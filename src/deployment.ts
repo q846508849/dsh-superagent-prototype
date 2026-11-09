@@ -1,19 +1,21 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
-import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { delimiter, isAbsolute } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
+import { absolutePathPattern, isExecutableFile, isWindows, pathCandidates } from './infra/platform.ts'
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+const absolute = (description: string) => s.string().pattern(absolutePathPattern()).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  cliEnv: s.dict(s.string()).default({})
+    .description('Environment variables for the GitHub and Feishu CLIs, such as the gh configuration directory or the lark-cli profile that keeps the bot account apart from the operator account.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -24,6 +26,7 @@ export const Config = s.object({
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  cliEnv: Record<string, string>
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -38,8 +41,8 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, cliEnv, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  return { stateDir, cliEnv, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
 export const GithubAccountsSchema = z.object({
@@ -59,20 +62,33 @@ export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
-  if (name.includes('/') && !isAbsolute(name)) throw new Error(`${name} must be a command name or an absolute path`)
-  const candidates = isAbsolute(name) ? [name] : path.split(delimiter).filter(dir => isAbsolute(dir) && !(exclude && sameDirectory(dir, exclude))).map(dir => join(dir, name))
+  if (looksLikePath(name) && !isAbsolute(name)) throw new Error(`${name} must be a command name or an absolute path`)
+  const directories = path.split(delimiter).filter(dir => isAbsolute(dir) && !(exclude && sameDirectory(dir, exclude)))
+  const named = isAbsolute(name)
+  const candidates = named ? [name] : pathCandidates(directories, name)
   for (const candidate of candidates) {
-    try { if (statSync(candidate).isFile()) { accessSync(candidate, constants.X_OK); return candidate } }
-    catch { /* Not an executable file here; try the next PATH directory. */ }
+    if (isExecutableFile(candidate, named)) return candidate
   }
-  throw new Error(`${name} is not an executable file${isAbsolute(name) ? '' : ' on PATH'}`)
+  throw new Error(`${name} is not an executable file${named ? '' : ' on PATH'}`)
 }
 
-export type Probe = (argv: string[]) => Promise<string>
-/** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
-export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
+/** Whether a name reads as a path rather than as a command name: a Windows path may use backslashes. */
+const looksLikePath = (name: string): boolean => name.includes('/') || (isWindows && name.includes('\\'))
+
+export type Probe = (argv: string[], env?: Record<string, string>) => Promise<string>
+/**
+ * Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary.
+ * Windows has no `env` command, so there the subprocess runtime applies the PATH override itself.
+ * The CLI environment travels with the probe, so the accounts a CLI uses are the ones the workers use.
+ */
+export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal, cliEnv: Record<string, string> = {}): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
-  return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  const variables = Object.entries(cliEnv).filter(([, value]) => value !== undefined && value !== '')
+  return (argv, env) => {
+    const extra = { ...Object.fromEntries(variables), ...env }
+    return runAsWorker(subprocess, isWindows ? argv : ['env', `PATH=${path}`, ...Object.entries(extra).map(([name, value]) => `${name}=${value}`), ...argv], cwd,
+      AbortSignal.any([signal, AbortSignal.timeout(60_000)]), isWindows ? { PATH: path, ...extra } : undefined)
+  }
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
@@ -117,7 +133,11 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('feishuCliFailed', { output: reason(error) }) }
   let cli = ''
   try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { fail(error) }
-  const run = (...args: string[]): Promise<string> => probe(['env', 'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1', 'LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1', cli, ...args]).catch(fail)
+  const run = (...args: string[]): Promise<string> => {
+    // Windows has no `env` command, so there the subprocess runtime applies the variables itself.
+    if (isWindows) return probe([cli, ...args], { LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' }).catch(fail)
+    return probe(['env', 'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1', 'LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1', cli, ...args]).catch(fail)
+  }
   const text = await run('auth', 'status')
   const status = parsed(AuthStatus, text.slice(text.indexOf('{')))
   if (!status) return fail(new SetupError('feishuNoApp'))

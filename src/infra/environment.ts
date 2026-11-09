@@ -10,6 +10,7 @@ import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh
 import type { Deployment } from '../deployment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
+import { SHIM_HELPER_NAME, SHIM_HELPER_SOURCE, credentialHelperFor, isWindows, normalizeGitPath, shimFileName, shimTarget } from './platform.ts'
 
 const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
@@ -18,13 +19,18 @@ const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Wr
 export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli']
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
 export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
-const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
+const posixQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 const gitQuote = (value: string): string => `"${value.replace(/[\\"]/g, char => `\\${char}`)}"`
-export const credentialHelper = (cli: string): string => `!${shellQuote(cli)} auth git-credential`
+/** A value a batch file holds: a percent sign doubles, and a quote would end the value early. */
+const batchValue = (value: string): string => value.replaceAll('%', '%%').replaceAll('"', '')
+export const credentialHelper = (cli: string): string => credentialHelperFor(cli)
 
 export function sameDirectory(a: string, b: string): boolean {
   const real = (path: string): string => { try { return realpathSync(path) } catch { return resolve(path) } }
-  return real(a) === real(b)
+  const left = real(a)
+  const right = real(b)
+  // A Windows path does not distinguish upper from lower case.
+  return isWindows ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 export function withoutDirectory(path: string, dir: string): string {
   return path.split(delimiter).filter(entry => !sameDirectory(entry, dir)).join(delimiter)
@@ -57,11 +63,17 @@ export function agentVariables(stateDir: string): Record<string, string | undefi
   }
 }
 
+/**
+ * The marker a line carries. A Windows batch file hides the marker behind a `rem` comment and the Node helper
+ * behind a line comment, so the comment prefix comes off before the marker is compared.
+ */
+const markerLine = (line: string): string => isWindows ? line.replace(/\r$/, '').replace(/^(?:rem[ \t]+|\/\/[ \t]?)/i, '') : line
+
 /** True when a regular file starts with the dsh-superagent marker in its first two lines; a symbolic link, directory, or other non-regular file never counts as written by dsh-superagent. */
 async function written(file: string): Promise<boolean> {
   if (!(await lstat(file)).isFile()) return false
   const head = (await readFile(file, 'utf8')).split('\n', 2)
-  return [MARKER, ...LEGACY_MARKERS].some(marker => head.includes(marker))
+  return [MARKER, ...LEGACY_MARKERS].some(marker => head.some(line => markerLine(line) === marker))
 }
 async function own(file: string, text: string, mode = 0o644): Promise<void> {
   let foreign = false
@@ -70,6 +82,54 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
   const temporary = `${file}.${process.pid}.tmp`
   await writeFile(temporary, text, { mode })
   await rename(temporary, file)
+}
+
+/** A worker shim: the program it stands in for, or the message it fails with. */
+interface Shim { name: string, program: string, failure: string }
+
+/** Writes a POSIX shim: a shell script that strips the shim directory from PATH and execs the program. */
+async function writePosixShim(dir: string, shim: Shim, kept: Set<string>): Promise<void> {
+  const withoutShims = [
+    `self=${posixQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
+    'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
+    'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
+  ].join('\n')
+  const run = (program: string): string => `${withoutShims}\nexec ${posixQuote(program)} "$@"`
+  const fail = (message: string): string => `echo ${posixQuote(message)} >&2\nexit 1`
+  const body = shim.failure ? fail(shim.failure) : run(shim.program)
+  const temporary = join(dir, `.${shim.name}.${process.pid}.tmp`)
+  await writeFile(temporary, `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: 0o755 })
+  await rename(temporary, join(dir, shim.name))
+  kept.add(shim.name)
+}
+
+/**
+ * Writes a Windows shim: a batch file that hands the program and the failure message to the Node helper, which
+ * runs the program with the shim directory taken out of PATH.
+ */
+async function writeWindowsShim(dir: string, shim: Shim, kept: Set<string>): Promise<void> {
+  const name = shimFileName(shim.name)
+  const temporary = join(dir, `.${name}.${process.pid}.tmp`)
+  await writeFile(temporary, [
+    '@echo off',
+    `rem ${MARKER}`,
+    'setlocal',
+    `set "DSH_SUPERAGENT_SHIM_TARGET=${batchValue(shimTarget(shim.program))}"`,
+    `set "DSH_SUPERAGENT_SHIM_FAIL=${batchValue(shim.failure)}"`,
+    // The desktop plugin runs under Electron, which runs a script as a plain Node process while this variable is set.
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    `"${batchValue(process.execPath)}" "${batchValue(join(dir, SHIM_HELPER_NAME))}" %*`,
+    '',
+  ].join('\r\n'))
+  await rename(temporary, join(dir, name))
+  kept.add(name)
+}
+
+/** Writes the Node helper the Windows shims run, next to them and in the same atomic way. */
+async function writeShimHelper(dir: string): Promise<void> {
+  const temporary = join(dir, `.${SHIM_HELPER_NAME}.${process.pid}.tmp`)
+  await writeFile(temporary, SHIM_HELPER_SOURCE)
+  await rename(temporary, join(dir, SHIM_HELPER_NAME))
 }
 
 /**
@@ -84,23 +144,20 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   for (const name of before) { const file = join(dir, name); if (!await written(file)) throw new SetupError('foreignFile', { file }) }
   // Workers may be running concurrently: write each shim to a temp file and atomically rename it so no command ever resolves past the shim directory.
   const kept = new Set<string>()
-  const shim = async (name: string, body: string): Promise<void> => {
-    const temporary = join(dir, `.${name}.${process.pid}.tmp`)
-    await writeFile(temporary, `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: 0o755 })
-    await rename(temporary, join(dir, name))
-    kept.add(name)
-  }
-  const withoutShims = [
-    `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
-    'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
-    'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
-  ].join('\n')
-  const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
-  const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
-  await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
+  const shims: Shim[] = [
+    { name: 'gh', program: github.cli, failure: '' },
+    { name: 'lark-cli', program: feishu ? feishu.cli : '', failure: feishu ? '' : 'lark-cli is unavailable: this installation has no Feishu bot.' },
+  ]
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
-    await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
+    shims.push({ name, program: '', failure: `${name} is blocked in this installation; use gh, which acts as ${github.login}.` })
+  }
+  if (isWindows) {
+    // A Windows shim cannot be a shell script, so the shims are batch files that run the Node helper beside them.
+    await writeShimHelper(dir)
+    kept.add(SHIM_HELPER_NAME)
+    for (const shim of shims) await writeWindowsShim(dir, shim, kept)
+  } else {
+    for (const shim of shims) await writePosixShim(dir, shim, kept)
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
   await own(workerGitConfig(stateDir), [
@@ -139,7 +196,10 @@ export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 
   const { github, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
   const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  // Git prints a Windows path with forward slashes, and a Windows path does not distinguish upper from lower case.
+  const actual = helpers.map(entry => normalizeGitPath(entry))
+  const expected = [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].map(entry => normalizeGitPath(entry))
+  if (actual.join('\0') !== expected.join('\0')) throw new SetupError('gitTooOld')
 }
 
 /**

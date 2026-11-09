@@ -7,6 +7,7 @@ import { threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
+import { commandInvocation, hiddenChild } from '../infra/platform.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
@@ -71,13 +72,15 @@ export const consumerRetry = (previous: number | undefined, ranMs: number): numb
  * Starts the Feishu event consumer. It runs without a console window, because the desktop host runs the plugin in a
  * windowless Electron process and a visible window would open on the operator's desktop.
  */
-export function spawnEventConsumer(cli: string): ChildProcessWithoutNullStreams {
-  return spawn(cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'],
+export function spawnEventConsumer(invocation: { file: string; args: string[] }): ChildProcessWithoutNullStreams {
+  return spawn(invocation.file, invocation.args,
     { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1',
-      LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' }, windowsHide: true })
+      LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' }, ...hiddenChild })
 }
 async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
-  const child = spawnEventConsumer(bot(ctx).cli)
+  // A Windows CLI that npm installed is a batch file, which only cmd.exe can start.
+  const invocation = commandInvocation(bot(ctx).cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'])
+  const child = spawnEventConsumer(invocation)
   const stdout = createInterface({ input: child.stdout }); const stderr = createInterface({ input: child.stderr })
   let chain = Promise.resolve(); let diagnostic = ''; let ready = false
   const stop = (): void => { child.stdin.end(); child.kill('SIGTERM') }

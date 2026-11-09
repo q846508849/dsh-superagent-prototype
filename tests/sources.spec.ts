@@ -1026,7 +1026,10 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
-describe('feishu event consumer', () => {
+// The fake bot CLI has to be a program the platform can start on its own: the Source spawns it without a shell,
+// and Windows cannot start a batch file that way. A Windows build of the fake would need a real executable, so
+// these cases run on POSIX systems only.
+describe.skipIf(process.platform === 'win32')('feishu event consumer', () => {
   let dir: string
   let controller: AbortController
   let running: Promise<unknown> | undefined

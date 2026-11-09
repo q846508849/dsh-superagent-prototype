@@ -7,11 +7,9 @@ const child = vi.hoisted(() => ({
     return {}
   }),
   spawn: vi.fn(() => ({ pid: 1 })),
-  spawnSync: vi.fn(),
-  exec: vi.fn(),
 }))
 
-vi.mock('node:child_process', () => ({ execFile: child.execFile, spawn: child.spawn, spawnSync: child.spawnSync, exec: child.exec }))
+vi.mock('node:child_process', () => ({ execFile: child.execFile, spawn: child.spawn }))
 
 import { Commands } from '../src/infra/commands.ts'
 import { spawnEventConsumer } from '../src/sources/feishu-loops.ts'
@@ -24,7 +22,7 @@ describe('console windows', () => {
     expect((child.execFile.mock.calls[0] as unknown[])[2]).toMatchObject({ windowsHide: true })
   })
   it('starts the Feishu event consumer without opening a console window', () => {
-    spawnEventConsumer('lark-cli')
+    spawnEventConsumer({ file: 'lark-cli', args: ['event', 'consume'] })
     expect((child.spawn.mock.calls[0] as unknown[])[2]).toMatchObject({ windowsHide: true })
   })
 })
