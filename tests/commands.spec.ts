@@ -58,6 +58,15 @@ describe('account-isolated operations', () => {
     await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1') })
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['--as','bot','--idempotency-key','stable-operation','--message-id','om_1']))
   })
+  it('replies as an interactive card, so the group reads it as a card message', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1'), text: 'Done' })
+    const args = run.mock.calls[0]![1] as string[]
+    expect(args).toEqual(expect.arrayContaining(['--msg-type','interactive']))
+    const card = JSON.parse(args[args.indexOf('--content') + 1]!)
+    expect(card.schema).toBe('2.0')
+    expect(card.body.elements[0].content).toBe('Done')
+  })
 })
 
 it('reports Feishu failures with their code and without command arguments', () => {
