@@ -1,5 +1,6 @@
 /** Outbox delivery when processing is paused or a Source kind registers late. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import type { OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -18,13 +19,20 @@ it('holds every message while processing is paused, and sends it once processing
   const lark = vi.mocked(Commands.prototype.lark)
   await h.runtime.settings.pause(true, 'panel')
   lark.mockClear()
+  // The reply travels as a card file, so its text is read while the command runs.
+  let sent = ''
+  lark.mockImplementation(async args => {
+    const list = args as string[]
+    sent = readFileSync(list[list.indexOf('--content') + 1]!.slice(1), 'utf8')
+    return {}
+  })
   h.runtime.outbox.send({ id: 'held', channel: feishu('1', 'x').channel!, text: '已合并。', kind: 'notice' })
   await h.runtime.sendReplies()
   expect([h.runtime.outbox.status('held'), lark.mock.calls.length]).toEqual(['pending', 0])
   await h.runtime.settings.pause(false, 'panel')
   await h.runtime.pump(); await h.runtime.sendReplies()
   expect(h.runtime.outbox.status('held')).toBe('sent')
-  expect(JSON.stringify(lark.mock.calls)).toContain('已合并。')
+  expect(sent).toContain('已合并。')
 })
 
 it('keeps a message for a Source that is not installed waiting, and sends it once the Source\'s kind registers', async () => {
