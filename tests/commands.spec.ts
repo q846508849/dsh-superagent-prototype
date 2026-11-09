@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import { CliError, Commands, commandError } from '../src/infra/commands.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
@@ -57,6 +58,21 @@ describe('account-isolated operations', () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{"ok":true,"data":{}}')
     await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1') })
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['--as','bot','--idempotency-key','stable-operation','--message-id','om_1']))
+  })
+  it('replies as an interactive card, so the group reads it as a card message', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    // The card file exists only while the command runs, so its content is read there.
+    let card: { schema: string; body: { elements: { content: string }[] } } | undefined
+    const run = vi.spyOn(commands,'run').mockImplementation(async (_program, args) => {
+      const content = (args as string[])[(args as string[]).indexOf('--content') + 1]!
+      expect(content.startsWith('@')).toBe(true)
+      card = JSON.parse(readFileSync(content.slice(1), 'utf8'))
+      return '{"ok":true,"data":{}}'
+    })
+    await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1'), text: 'Done' })
+    expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['--msg-type','interactive']))
+    expect(card?.schema).toBe('2.0')
+    expect(card?.body.elements[0]!.content).toBe('Done')
   })
 })
 

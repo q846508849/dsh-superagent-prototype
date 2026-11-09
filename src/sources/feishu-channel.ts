@@ -1,9 +1,10 @@
-/** Feishu outbound channel: posts threaded bot replies and constructs chat deep links. */
+/** Feishu outbound channel: posts bot replies into the chat and constructs chat deep links. */
 import type { OutboundMessage } from '../core/index.ts'
 import { CliError } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
+import { feishuCardFile } from './feishu-card.ts'
 import { feishuTriggerId } from './feishu-trigger.ts'
 
 /** Feishu or Lark AppLink that opens a chat; used when the message's own link was not delivered with the event. */
@@ -15,17 +16,24 @@ export const feishuChatLink = (brand: 'feishu' | 'lark', chatId: string): string
  */
 const gone = (error: unknown): boolean => error instanceof CliError && error.code !== undefined && (error.code === 230011
   || /withdrawn/i.test(error.message) || (Math.floor(error.code / 100) === 2300 && /not found/i.test(error.message)))
-/** Replies in the topic of the target message; Feishu keeps at most one reply per idempotency key (the outgoing message's `message.id`). */
+/**
+ * Replies to the message that triggered the work, in the chat's own flow: Feishu keeps at most one
+ * message per idempotency key (the outgoing message's `message.id`). The reply is not posted as a
+ * thread reply, so the group reads it in the chat instead of inside a topic under the trigger. It is an
+ * interactive card, so the group reads it as a card message, the way the other bots of the group answer.
+ */
 export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)
-  const reply = ['im', '+messages-reply', '--message-id', messageId, '--markdown', text, '--reply-in-thread', '--idempotency-key', message.id]
+  const card = feishuCardFile(text)
+  const reply = ['im', '+messages-reply', '--message-id', messageId, '--msg-type', 'interactive', '--content', `@${card.path}`, '--idempotency-key', message.id]
   try { await host.commands.lark(reply) }
   catch (error) {
     if (gone(error)) return 'gone'
     throw error
   }
+  finally { card.remove() }
   return 'sent'
 }
 /** Fallback chat link on the bot's brand; the message's own deep link on its Trigger is preferred when available. */

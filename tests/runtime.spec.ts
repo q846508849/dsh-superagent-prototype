@@ -231,7 +231,9 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_1`)?.subscriptions).toEqual([ticket.id])
   expect(runtime.store.replyStatus(key('ack', trigger.id))).toBe('sent')
   const larkCalls = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args)
-  expect(larkCalls.find(args => args[1] === '+messages-reply')).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--markdown', '收到，修复回归。']))
+  // The reply goes out as an interactive card, so the group reads it as a card message.
+  const replyCall = larkCalls.find(args => args[1] === '+messages-reply')!
+  expect(replyCall).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--msg-type', 'interactive']))
   // The first message holds the request itself: an explicit ticket has no assignment text beyond it, and nothing to read first.
   const first = relays(sessionId)[0]!
   expect(first).toEqual({ ticket_id: ticket.id, title: '修复回归', trigger: expect.objectContaining({ trigger_id: trigger.id, from: MEMBER,
