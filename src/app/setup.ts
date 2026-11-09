@@ -35,7 +35,7 @@ export class Setup {
     this.variables = agentVariables(host.machine.stateDir)
   }
   /** Host command environment with agent git variables applied and the worker shim directory excluded from PATH. */
-  get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
+  get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, ...this.host.machine.cliEnv, PATH: this.path } }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
     return this.resolved
@@ -71,7 +71,7 @@ export class Setup {
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
     const { context, machine, lifetime } = this.host
-    return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
+    return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime, machine.cliEnv)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
@@ -89,7 +89,7 @@ export class Setup {
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
-    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
+    this.restoreEnvironment = applyEnvironment({ ...this.variables, ...machine.cliEnv }, machine.stateDir, this.path)
     await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
       this.restore()
       machineProblem(error)

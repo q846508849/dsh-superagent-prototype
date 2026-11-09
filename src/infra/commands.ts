@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
+import { commandInvocation, hiddenChild } from './platform.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -67,11 +68,11 @@ export class Commands {
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
-      // The desktop host runs the plugin in a windowless Electron process: a console program started without
-      // `windowsHide` opens a terminal window on the operator's desktop every time the plugin runs a CLI.
-      const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+      // A Windows CLI that npm installed is a batch file, which only cmd.exe can start.
+      const invocation = commandInvocation(program, args)
+      const { stdout } = await exec(invocation.file, invocation.args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' },
-        windowsHide: true })
+        ...hiddenChild })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
