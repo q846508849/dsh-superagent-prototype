@@ -16,6 +16,8 @@ Setup has many steps, so an agent does it with you. Ask your coding agent:
 
 It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
 
+The prototype runs on Linux and macOS and on Windows. A Windows host needs the same Node.js, git, Python, GitHub CLI and DeepSeek Harness versions, and differs in a few commands and dependencies: no tmux, npm instead of pnpm for the build, batch-file command shims, and a PowerShell prepare command. The Windows steps are in [SETUP.md](SETUP.md#windows) and in [docs/006-deployment.md](docs/006-deployment.md#windows).
+
 ## Documentation
 
 Read the numbered documents in order; each builds only on the ones before it.
@@ -33,6 +35,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
+
+On Windows, pnpm's directory layout makes the build fail with `ERR_MODULE_NOT_FOUND: ansis`, so install with `npm install --legacy-peer-deps` and run the steps separately: `npm run typecheck`, `npm run test`, `npm run build`. The `check` script itself calls pnpm.
 
 ## License
 

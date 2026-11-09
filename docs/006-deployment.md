@@ -20,11 +20,13 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Prerequisites
 
-- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
+These are the prerequisites of a Linux or macOS host. A Windows host needs the same Node.js, git, GitHub CLI and DeepSeek Harness versions, and differs in the rest; see [Windows](#windows).
+
+- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux (tmux on Linux and macOS only; a Windows host needs none)
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
-- For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+- For Feishu: `lark-cli` (tested with 1.0.98) and a Feishu or Lark app with a bot
 
 ## Accounts
 
@@ -46,6 +48,8 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
+   On Windows the wrapper is a batch file (`gh-agent.cmd`) instead of a shell script, and the CLI is signed in with a token instead of the device flow; see [Windows](#windows).
+
 ### Feishu bot (optional)
 
 1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.
@@ -63,6 +67,23 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    ```
 
    The first command reads the app secret from standard input. Use a separate configuration directory: `lark-cli` allows one profile per app id, and your personal configuration may already contain a user login for that app.
+
+   Since `lark-cli` 1.0.91 the bot of its own is a named profile rather than a separate configuration directory, and the wrapper selects it with `LARKSUITE_CLI_PROFILE`. The same bot then reads its secret from the keychain entry the app id already has, so the personal profile keeps its own identity:
+
+   ```sh
+   lark-cli profile add --app-id <cli_…> --app-secret-stdin --name dsh-superagent-bot
+   LARKSUITE_CLI_PROFILE=dsh-superagent-bot lark-cli config strict-mode bot
+   cat > ~/.local/bin/lark-bot <<'EOF'
+   #!/bin/sh
+   export LARKSUITE_CLI_PROFILE=dsh-superagent-bot
+   exec lark-cli "$@"
+   EOF
+   chmod +x ~/.local/bin/lark-bot
+   ```
+
+   The `config strict-mode bot` command sets the restriction on that profile alone, which leaves the profile the operator uses untouched. `lark-cli` refuses to run it without a confirmation, because it hides every command that acts as a user.
+
+   On Windows the wrapper is a batch file (`lark-bot.cmd`) that sets the same variable, with a Windows path such as `%USERPROFILE%\.lark-cli-dsh-superagent`; see [Windows](#windows).
 
    The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
@@ -84,15 +105,20 @@ The pinned version above is public; other versions must satisfy `engines.dsh` in
 
 The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
 
+On Windows, use the PowerShell block of [Windows](#windows): the same commands, except that npm builds this repository instead of pnpm.
+
 Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its `cordis.patch.yml`, including machine configuration. Do not use it for upgrades.
 
 ## Machine configuration
 
 Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
 
+On Windows the profile lives in `%USERPROFILE%\.dsh\profiles\superagent\cordis.patch.yml`, and `stateDir` takes an absolute Windows path.
+
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `cliEnv` | no | Environment variables for the Source CLIs, such as `GH_CONFIG_DIR` and `LARKSUITE_CLI_PROFILE`, so that the agent's own account and the operator's stay apart. They reach the deployment checks, the Source processes and the worker's commands |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
@@ -104,9 +130,13 @@ scripts/dsh-superagent start
 scripts/dsh-superagent status
 ```
 
-`start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script.
+On Windows, run the same commands through `python`; see [Windows](#windows).
 
-`stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
+On Linux and macOS, `start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script.
+
+`stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process, and on Linux and macOS they never touch other tmux sessions.
+
+On Windows there is no tmux: `start` launches a detached process and records its process id in `control/profiles/<profile>/service.pid`, and the script runs through `python`. Everything else — the exit codes, the log files, the Management API — is the same; see [Windows](#windows).
 
 `status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
 
@@ -140,11 +170,121 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 `--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
 
+## Windows
+
+A Windows host runs the same profile, the same settings and the same Management API as a Linux or macOS host. Only the commands and a few dependencies differ. The Windows steps were verified on Windows 10 and 11 with PowerShell 5.1 and PowerShell 7.
+
+### Windows prerequisites
+
+| Dependency | Linux and macOS | Windows |
+| --- | --- | --- |
+| Terminal multiplexer | `tmux` holds the service | None needed: the service script starts a detached process and records its process id in a file |
+| Python | `python3` | `python`; the name `python3` usually does not exist |
+| Build of this repository | `pnpm install && pnpm build` | `npm install --legacy-peer-deps && npm run build` |
+| GitHub CLI | `gh` on `PATH` | `winget install --id GitHub.cli`, then `gh auth login --with-token` |
+| git | 2.32 or later | 2.32 or later; each Ticket checks out through a worktree |
+
+Two of these differences have a reason worth knowing:
+
+- **pnpm does not build this repository on Windows.** pnpm's directory layout leaves the `tsdown` build without one of its dependencies, and the build fails with `ERR_MODULE_NOT_FOUND: ansis`. npm's layout does not, so build with npm on Windows and keep pnpm on Linux and macOS.
+- **Sign the GitHub CLI in with a token.** The device flow of `gh auth login` does not reach the network on a restricted network and never completes. Read the agent account's token from standard input instead:
+
+  ```powershell
+  Get-Content "$env:USERPROFILE\gh-agent-token.txt" | gh auth login --with-token
+  gh api user --jq .login
+  ```
+
+  The token needs the `repo` scope. The GitHub CLI field of the Source takes the absolute path of the executable, for example `C:\Program Files\GitHub CLI\gh.exe`. With `--with-token` the CLI stores the token in its own configuration and asks nothing else.
+
+  To keep the agent's credentials apart from the operator's on one machine, use a wrapper with its own `GH_CONFIG_DIR`, as on Linux and macOS, written as a batch file:
+
+  ```bat
+  @echo off
+  setlocal
+  set "GH_CONFIG_DIR=%USERPROFILE%\.config\gh-agent"
+  "C:\Program Files\GitHub CLI\gh.exe" %*
+  ```
+
+  Sign that configuration in with the same token flow, and point the Source's GitHub CLI field at the wrapper, for example `C:\Users\<user>\.local\bin\gh-agent.cmd`:
+
+  ```powershell
+  $env:GH_CONFIG_DIR = "$env:USERPROFILE\.config\gh-agent"
+  Get-Content "$env:USERPROFILE\gh-agent-token.txt" | gh auth login --with-token
+  gh api user --jq .login
+  ```
+
+  The Feishu bot wrapper is a batch file in the same way, `lark-bot.cmd`, and sets `LARKSUITE_CLI_PROFILE` to the bot's own profile. A `lark-cli` of 1.0.98 or later reads a named profile; the `LARKSUITE_CLI_CONFIG_DIR` of 1.0.90 does nothing on it.
+
+### Windows install
+
+Run this block once in PowerShell, on a machine that has no `superagent` profile yet. Replace `<this repository>` with the clone URL of this repository, for example `https://github.com/deepseek-ai/dsh-superagent-prototype`: the angle brackets are a placeholder, and PowerShell does not accept them as they stand.
+
+```powershell
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+git clone <this repository> dsh-superagent; cd dsh-superagent
+npm install --legacy-peer-deps
+npm run build
+dsh superagent --from-default-profile web --dump-config > $null
+dsh plugin --profile superagent add "link:$PWD"
+```
+
+The fifth command creates `%USERPROFILE%\.dsh\profiles\superagent` from the DeepSeek Harness Web template, and the sixth installs this bundle into it. Set `DSH_HOME` to relocate the default `.dsh` directory.
+
+Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `%USERPROFILE%\.dsh\profiles\superagent\cordis.patch.yml`, replacing that file, and set an absolute `stateDir`, for example `C:\Users\<user>\.dsh\state\superagent`.
+
+### Windows service
+
+The service script keeps its commands, and runs through Python:
+
+```powershell
+python scripts/dsh-superagent start
+python scripts/dsh-superagent status
+python scripts/dsh-superagent stop
+python scripts/dsh-superagent restart
+```
+
+Without tmux, `start` launches a detached process whose id it writes to `.artifacts/control/profiles/<profile>/service.pid`, and `stop` and `restart` ask that process to shut down and wait for the Executors, as they do on Linux and macOS. The script keeps its name and has no `.py` extension, and PowerShell does not run it by itself, so call it through `python`. The hourly check above uses the same command; on Windows it is `python scripts/dsh-superagent --profile superagent status`.
+
+The Management API stays where it is, `http://127.0.0.1:3082/orchestrator/api/` with the header `x-orchestrator-request: 1`. From PowerShell, `Invoke-RestMethod` takes the place of the `curl` and `jq` of the example under Management API.
+
+### Windows worker shims
+
+`<stateDir>/worker-bin` holds the command shims that bind `gh` and `lark-cli` to the agent's and the bot's CLIs, and that block the commands in `blockedCommands`. On Linux and macOS a shim is a `#!/bin/sh` script; on Windows it is a `<name>.cmd` batch file. A shim removes the shim directory from `PATH` before it runs its target, so that a wrapper resolving `gh` by name reaches the real executable and not the shim. A batch file cannot change the `PATH` of the process it starts, so on Windows that step is done by a Node helper the shim calls.
+
+Blocked commands work as they do on Linux and macOS: the shim prints the same message and exits with code 1. `gh`, `git` and `lark-cli` cannot be blocked.
+
+### Windows prepare command
+
+The prepare command runs with `sh -c` on Linux and macOS, and with PowerShell on Windows. The command text stays the same; the variable syntax differs:
+
+- Linux and macOS: `git clone https://github.com/<owner>/<repo> "$DSH_SUPERAGENT_DIR"`
+- Windows: `git clone https://github.com/<owner>/<repo> "$env:DSH_SUPERAGENT_DIR"`
+
+PowerShell does not read environment variables into its variable namespace, so `$DSH_SUPERAGENT_DIR` is empty there and `$env:DSH_SUPERAGENT_DIR` is the variable. A path with spaces needs the quotes, as in the example.
+
+The worktree command of the Execution settings has the same difference:
+
+```powershell
+$head = if ($env:DSH_SUPERAGENT_GITHUB_PR_HEAD) { $env:DSH_SUPERAGENT_GITHUB_PR_HEAD } else { 'HEAD' }
+git -C C:\src\widgets fetch --no-tags "https://github.com/$env:DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${head}:refs/dsh-superagent/$env:DSH_SUPERAGENT_TICKET"
+git -C C:\src\widgets worktree add -b "agent/$env:DSH_SUPERAGENT_NAME" "$env:DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$env:DSH_SUPERAGENT_TICKET"
+```
+
+PowerShell 5.1 has no `&&` operator, so the two commands are written one after the other; stop when the first one fails.
+
+### Windows limits
+
+- **The worker runs as the operator's Windows user.** The worker preset uses `danger-full-access`, and the plugin changes the process-wide `PATH` and the git configuration of the process it runs in. A worker can run programs by path and read the operator's home directory. Use a separate Windows account, or at least a separate DSH profile, for the agent.
+- **The GitHub Source needs github.com and `gh`.** GitHub Enterprise Server is not supported, on Windows as on any other host.
+- **Feishu needs `lark-cli` 1.0.98.** The npm distribution of `lark-cli` runs on Windows as it does on Linux and macOS, so the Feishu Source works there too. Since 1.0.91 the bot of its own is a named profile, which the wrapper selects with `LARKSUITE_CLI_PROFILE`.
+- **The Source CLIs must be real executables on Windows.** `cmd.exe` re-parses an argument that holds `&`, which breaks the GitHub Source's API paths, and npm's `.cmd` shims drop the environment a caller sets, so a wrapper that exports `GH_CONFIG_DIR` or `LARKSUITE_CLI_PROFILE` loses it. Point the Sources at `gh.exe` and `lark-cli.exe` and carry their environment in `cliEnv`.
+- **A Feishu reply lands in the chat, not in a topic.** The bot answers the message that triggered the work in the chat's own flow, so a group reads the answer where the request was made, even when the request was written in a topic.
+
 ## Settings
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent` on Linux and macOS, or `C:\Users\me\.local\bin\gh-agent.cmd` on Windows. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -154,6 +294,8 @@ Setup must succeed before polling or work starts. Overview lists missing require
    ```
 
    List personal CLIs, such as one signed in to your own account, as blocked commands.
+
+   The command runs with `sh -c` on Linux and macOS and with PowerShell on Windows, so the environment variables are read as `$DSH_SUPERAGENT_DIR` in the first and as `$env:DSH_SUPERAGENT_DIR` in the second; see [Windows](#windows).
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
 
 ### Management API
@@ -213,6 +355,8 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
   -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
 ```
 
+On Windows, the same requests go through `Invoke-RestMethod` with the same header, for example `Invoke-RestMethod -Headers @{ 'x-orchestrator-request' = '1' } http://127.0.0.1:3082/orchestrator/api/settings`; see [Windows](#windows).
+
 ## Setup checks
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
@@ -221,7 +365,7 @@ Setup verifies the GitHub repository and the agent's push access, writes the wor
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target. The shims are `#!/bin/sh` scripts on Linux and macOS and `<name>.cmd` batch files on Windows; see [Windows](#windows).
 - **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
@@ -234,7 +378,7 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 1. Wait until no Executor is in the middle of a turn.
 2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
+3. Run `git pull && pnpm install && pnpm build`. On Windows, run `git pull; npm install --legacy-peer-deps; npm run build` instead.
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
