@@ -4,7 +4,7 @@ import { CliError } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
-import { feishuCard } from './feishu-card.ts'
+import { feishuCardFile } from './feishu-card.ts'
 import { feishuTriggerId } from './feishu-trigger.ts'
 
 /** Feishu or Lark AppLink that opens a chat; used when the message's own link was not delivered with the event. */
@@ -24,12 +24,14 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)
-  const reply = ['im', '+messages-reply', '--message-id', messageId, '--msg-type', 'interactive', '--content', feishuCard(text), '--reply-in-thread', '--idempotency-key', message.id]
+  const card = feishuCardFile(text)
+  const reply = ['im', '+messages-reply', '--message-id', messageId, '--msg-type', 'interactive', '--content', `@${card.path}`, '--reply-in-thread', '--idempotency-key', message.id]
   try { await host.commands.lark(reply) }
   catch (error) {
     if (gone(error)) return 'gone'
     throw error
   }
+  finally { card.remove() }
   return 'sent'
 }
 /** Fallback chat link on the bot's brand; the message's own deep link on its Trigger is preferred when available. */

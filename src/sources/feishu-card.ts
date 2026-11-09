@@ -1,4 +1,7 @@
 /** Feishu interactive card (Card 2.0) for a bot reply. */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /** The card's title bar: the bot's own name, so a card reads as the bot's message in the chat. */
 const TITLE = 'superagent'
@@ -27,4 +30,19 @@ export function feishuCard(text: string): string {
     header: { title: { tag: 'plain_text', content: TITLE }, template: 'blue' },
     body: { direction: 'vertical', elements: [{ tag: 'markdown', content: cardBody(text) }] },
   })
+}
+
+/** A card written to a temporary file, with the function that removes it again. */
+export interface CardFile { path: string; remove: () => void }
+
+/**
+ * Writes a reply's card to a temporary file and returns it. The card travels to the CLI as a file rather than
+ * as an argument: on Windows the command line goes through cmd.exe, which reads a `|` or `&` in the reply as a
+ * shell operator and ends the command there.
+ */
+export function feishuCardFile(text: string): CardFile {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-superagent-card-'))
+  const path = join(directory, 'card.json')
+  writeFileSync(path, feishuCard(text), 'utf8')
+  return { path, remove: () => rmSync(directory, { recursive: true, force: true }) }
 }

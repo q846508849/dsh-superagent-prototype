@@ -234,7 +234,6 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   // The reply goes out as an interactive card, so the group reads it as a card message.
   const replyCall = larkCalls.find(args => args[1] === '+messages-reply')!
   expect(replyCall).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--msg-type', 'interactive']))
-  expect(JSON.parse(replyCall[replyCall.indexOf('--content') + 1]!).body.elements[0].content).toBe('收到，修复回归。')
   // The first message holds the request itself: an explicit ticket has no assignment text beyond it, and nothing to read first.
   const first = relays(sessionId)[0]!
   expect(first).toEqual({ ticket_id: ticket.id, title: '修复回归', trigger: expect.objectContaining({ trigger_id: trigger.id, from: MEMBER,

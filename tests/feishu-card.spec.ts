@@ -1,5 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { cardBody, feishuCard } from '../src/sources/feishu-card.ts'
+import { cardBody, feishuCard, feishuCardFile } from '../src/sources/feishu-card.ts'
 
 describe('Feishu card', () => {
   it('makes the reply a card message that carries its text', () => {
@@ -13,5 +14,13 @@ describe('Feishu card', () => {
   })
   it('turns an image into a link, because a card renders an image only from an uploaded key', () => {
     expect(cardBody('![图](https://example.com/a.png)')).toBe('[图](https://example.com/a.png)')
+  })
+  it('writes the card to a file that holds the same JSON, and removes it again', () => {
+    const card = feishuCardFile('回复正文')
+    try {
+      expect(existsSync(card.path)).toBe(true)
+      expect(JSON.parse(readFileSync(card.path, 'utf8'))).toEqual(JSON.parse(feishuCard('回复正文')))
+    } finally { card.remove() }
+    expect(existsSync(card.path)).toBe(false)
   })
 })
